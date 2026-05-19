@@ -1,0 +1,600 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "waha-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "6b802b46-2a5c-4bc5-9532-4aeca817c32a",
+      "name": "01 | Webhook WAHA",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -4128,
+        -304
+      ],
+      "webhookId": "c02dcc75-0df7-43fa-8f7d-594c63d316cd"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extrair dados da mensagem do WAHA\nconst raw = $input.first().json;\nconst body = raw.body || raw;\n\nconsole.log('[02] Payload event:', body.event);\nconsole.log('[02] Payload session:', body.session);\n\n// WAHA envia evento 'message' com payload dentro de 'payload'\nconst payload = body.payload || {};\n\n// chatId vem como '5541996893300@c.us' (já é o número real!)\nconst chatId = payload.from || payload.chatId || '';\nconst telefone = chatId.replace('@c.us', '').replace('@g.us', '').replace('@s.whatsapp.net', '');\n\nconst texto = payload.body || payload.text || '';\nconst nome = payload._data?.notifyName || payload.pushName || payload.notifyName || 'Cliente';\n\n// Filtros\nconst ehGrupo = chatId.includes('@g.us');\nconst ehFromMe = payload.fromMe === true;\nconst vazio = !texto || texto.trim() === '';\nconst naoEhEvento = body.event !== 'message';\n\nconsole.log(`[02] Telefone=${telefone} | Texto=\"${texto}\" | Nome=${nome} | Grupo=${ehGrupo} | FromMe=${ehFromMe}`);\n\nreturn [{\n  json: {\n    telefone,\n    chatId,\n    texto: texto.trim().toLowerCase(),\n    texto_original: texto.trim(),\n    nome,\n    ignorar: ehGrupo || ehFromMe || vazio || naoEhEvento\n  }\n}];"
+      },
+      "id": "ebf2f8cd-b493-4888-881a-5f3b69b02e9b",
+      "name": "02 | Extrair Mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3936,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.ignorar }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2f648a0d-49ec-44cc-894f-4bb8a829021f",
+      "name": "03 | Filtrar",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -3728,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ 'estado_' + $json.telefone }}",
+        "options": {}
+      },
+      "id": "13f09d56-4972-4b58-90ec-dd8ad569ec40",
+      "name": "04 | Get Estado Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -3536,
+        -384
+      ],
+      "credentials": {
+        "redis": {
+          "id": "869djH6WbJ52VGZi",
+          "name": "Redis account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const msg = $('02 | Extrair Mensagem').first().json;\nconst raw = $input.first().json?.value;\n\nlet estado = {\n  etapa: 'inicio',\n  nome: msg.nome,\n  interesse: '',\n  orcamento: '',\n  entrada: '',\n  financiamento: '',\n  modelo_interesse: '',\n  contato_preferido: '',\n  timestamp_inicio: new Date().toISOString()\n};\n\nif (raw) {\n  try {\n    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n    estado = { ...estado, ...parsed };\n  } catch(e) {\n    console.log('[05] Erro parse:', e.message);\n  }\n}\n\nconsole.log(`[05] Etapa atual: ${estado.etapa}`);\nreturn [{ json: { ...msg, estado } }];"
+      },
+      "id": "90e0610a-be9d-4026-8562-aec019d4df7b",
+      "name": "05 | Montar Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3328,
+        -384
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { texto, texto_original, telefone, chatId, nome, estado } = $input.first().json;\nconst etapaAtual = estado.etapa;\nlet proxEtapa = etapaAtual;\nlet resposta = '';\nlet finalizado = false;\nlet novoEstado = { ...estado };\n\nconsole.log(`[06] Etapa=${etapaAtual} | Texto=\"${texto}\"`);\n\nswitch(etapaAtual) {\n\n  case 'inicio':\n    resposta = `Olá! 👋 Bem-vindo à *Sky Motors*!\\n\\nSou a *Camila*, assistente virtual da Sky. Estou aqui pra te ajudar a encontrar o carro ideal! 🚗\\n\\nPrimeiro, pode me dizer seu nome?`;\n    proxEtapa = 'aguardando_nome';\n    break;\n\n  case 'aguardando_nome':\n    novoEstado.nome = texto_original;\n    resposta = `Prazer, *${texto_original}*! 😊\\n\\nO que você está procurando?\\n\\n1️⃣ Comprar um carro\\n2️⃣ Avaliação do meu carro\\n3️⃣ Financiamento\\n4️⃣ Falar com atendente\\n\\nDigite o número da opção:`;\n    proxEtapa = 'aguardando_interesse';\n    break;\n\n  case 'aguardando_interesse':\n    const ops = { '1': 'Comprar carro', '2': 'Avaliação', '3': 'Financiamento', '4': 'Atendente' };\n    if (ops[texto]) {\n      novoEstado.interesse = ops[texto];\n      if (texto === '4') {\n        resposta = `Certo! Um atendente vai entrar em contato. ⏰\\n\\nQual o melhor horário pra te ligar?\\n\\n1️⃣ Manhã (8h–12h)\\n2️⃣ Tarde (12h–18h)\\n3️⃣ Noite (18h–20h)`;\n        proxEtapa = 'aguardando_horario';\n      } else if (texto === '2') {\n        resposta = `Ótimo! Pra avaliar seu veículo:\\n\\n📋 *Qual o modelo e ano do seu carro?*`;\n        proxEtapa = 'aguardando_modelo_avaliacao';\n      } else {\n        resposta = `Ótimo! Vamos achar seu carro ideal. 🚘\\n\\nVocê tem algum modelo em mente?\\n\\nEx: *Civic 2020*, *HB20*, *Creta*, *Qualquer um*`;\n        proxEtapa = 'aguardando_modelo';\n      }\n    } else {\n      resposta = `Por favor, digite só o número:\\n\\n1️⃣ Comprar\\n2️⃣ Avaliar meu carro\\n3️⃣ Financiamento\\n4️⃣ Atendente`;\n    }\n    break;\n\n  case 'aguardando_modelo':\n    novoEstado.modelo_interesse = texto_original;\n    resposta = `Anotado: *${texto_original}* 👍\\n\\nQual a faixa de orçamento?\\n\\n1️⃣ Até R$ 30.000\\n2️⃣ R$ 30.000 – R$ 50.000\\n3️⃣ R$ 50.000 – R$ 80.000\\n4️⃣ Acima de R$ 80.000\\n5️⃣ Ainda pesquisando`;\n    proxEtapa = 'aguardando_orcamento';\n    break;\n\n  case 'aguardando_modelo_avaliacao':\n    novoEstado.modelo_interesse = texto_original;\n    resposta = `Perfeito: *${texto_original}* 🚗\\n\\nO carro está *quitado* ou ainda *financiado*?\\n\\n1️⃣ Quitado\\n2️⃣ Financiado`;\n    proxEtapa = 'aguardando_status_veiculo';\n    break;\n\n  case 'aguardando_status_veiculo':\n    novoEstado.financiamento = ({ '1': 'Quitado', '2': 'Financiado' })[texto] || texto_original;\n    resposta = `Entendido! Vamos fazer a avaliação. 📞\\n\\nQual o melhor horário pra te ligar?\\n\\n1️⃣ Manhã (8h–12h)\\n2️⃣ Tarde (12h–18h)\\n3️⃣ Noite (18h–20h)`;\n    proxEtapa = 'aguardando_horario';\n    break;\n\n  case 'aguardando_orcamento':\n    const fx = { '1': 'Até R$ 30k', '2': 'R$ 30k–50k', '3': 'R$ 50k–80k', '4': 'Acima de R$ 80k', '5': 'Pesquisando' };\n    novoEstado.orcamento = fx[texto] || texto_original;\n    resposta = `Ótimo! Vai precisar de *financiamento*?\\n\\n1️⃣ Financiamento total\\n2️⃣ Entrada + financiamento\\n3️⃣ À vista\\n4️⃣ Não sei`;\n    proxEtapa = 'aguardando_financiamento';\n    break;\n\n  case 'aguardando_financiamento':\n    const fm = { '1': 'Financiamento total', '2': 'Entrada + Financ.', '3': 'À vista', '4': 'Não definido' };\n    novoEstado.financiamento = fm[texto] || texto_original;\n    if (texto === '2') {\n      resposta = `Quanto você tem disponível de entrada?\\n\\nEx: *R$ 5.000*, *R$ 10.000*, *Não sei*`;\n      proxEtapa = 'aguardando_entrada';\n    } else {\n      resposta = `Perfeito! Última pergunta: qual o melhor horário pra ligar?\\n\\n1️⃣ Manhã (8h–12h)\\n2️⃣ Tarde (12h–18h)\\n3️⃣ Noite (18h–20h)`;\n      proxEtapa = 'aguardando_horario';\n    }\n    break;\n\n  case 'aguardando_entrada':\n    novoEstado.entrada = texto_original;\n    resposta = `Anotado! 👍\\n\\nQual o melhor horário pra ligar?\\n\\n1️⃣ Manhã (8h–12h)\\n2️⃣ Tarde (12h–18h)\\n3️⃣ Noite (18h–20h)`;\n    proxEtapa = 'aguardando_horario';\n    break;\n\n  case 'aguardando_horario':\n    const h = { '1': 'Manhã (8h–12h)', '2': 'Tarde (12h–18h)', '3': 'Noite (18h–20h)' };\n    novoEstado.contato_preferido = h[texto] || texto_original;\n    novoEstado.timestamp_fim = new Date().toISOString();\n    resposta = `Perfeito, *${novoEstado.nome}*! ✅\\n\\nRecebi tudo:\\n📋 ${novoEstado.interesse}\\n🚗 ${novoEstado.modelo_interesse || 'Em aberto'}\\n💰 ${novoEstado.orcamento || 'N/A'}\\n💳 ${novoEstado.financiamento || 'N/A'}\\n⏰ ${novoEstado.contato_preferido}\\n\\nUm consultor entrará em contato no horário indicado. 🤝`;\n    proxEtapa = 'finalizado';\n    finalizado = true;\n    break;\n\n  case 'finalizado':\n    if (texto === 'reiniciar' || texto === 'oi' || texto === 'olá') {\n      novoEstado = { etapa: 'inicio', nome: nome, timestamp_inicio: new Date().toISOString() };\n      proxEtapa = 'aguardando_nome';\n      resposta = `Olá novamente! 😊 Vamos começar uma nova consulta.\\n\\nPode me dizer seu nome?`;\n    } else {\n      resposta = `Olá! Seu cadastro já está com nossos consultores. Em breve entrarão em contato!\\n\\nDigite *reiniciar* pra começar nova consulta.`;\n    }\n    break;\n\n  default:\n    resposta = `Olá! Bem-vindo à *Sky Motors*! 🚗\\n\\nComo posso te ajudar?\\n\\n1️⃣ Comprar\\n2️⃣ Avaliar meu carro\\n3️⃣ Financiamento\\n4️⃣ Atendente`;\n    proxEtapa = 'aguardando_interesse';\n}\n\nnovoEstado.etapa = proxEtapa;\n\nreturn [{\n  json: {\n    telefone,\n    chatId,\n    nome: novoEstado.nome || nome,\n    resposta,\n    novoEstado,\n    finalizado,\n    estadoJson: JSON.stringify(novoEstado)\n  }\n}];"
+      },
+      "id": "5784d3b4-32b2-416b-bb7d-33fc61165309",
+      "name": "06 | Motor SDR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3136,
+        -384
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ 'estado_' + $json.telefone }}",
+        "value": "={{ $json.estadoJson }}",
+        "expire": true,
+        "ttl": 86400
+      },
+      "id": "764dca78-6eb4-44b7-9cf1-31d0f2f2e66d",
+      "name": "07 | Set Estado Redis",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [
+        -2928,
+        -384
+      ],
+      "credentials": {
+        "redis": {
+          "id": "869djH6WbJ52VGZi",
+          "name": "Redis account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://waha-production-8d99.up.railway.app/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "skymotor2025"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": \"{{ $json.chatId }}\",\n  \"text\": {{ JSON.stringify($json.resposta) }}\n}",
+        "options": {}
+      },
+      "id": "7b750db2-2cec-4e70-b2f0-377510a6d98d",
+      "name": "08 | Enviar WhatsApp Lead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2736,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('06 | Motor SDR').first().json.finalizado }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "96df9799-bb2d-4165-9d07-1fb9a30d6bdd",
+      "name": "09 | Lead Qualificado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -2528,
+        -304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $('06 | Motor SDR').first().json;\nconst e = item.novoEstado;\nconst agora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });\n\nconst ficha = `🚗 *NOVO LEAD QUALIFICADO — SKY MOTORS*\\n━━━━━━━━━━━━━━━━━━━\\n👤 *Nome:* ${e.nome || item.nome}\\n📱 *WhatsApp:* ${item.telefone}\\n⏰ *Horário:* ${agora}\\n━━━━━━━━━━━━━━━━━━━\\n📋 *Interesse:* ${e.interesse || 'N/I'}\\n🚘 *Modelo:* ${e.modelo_interesse || 'Em aberto'}\\n💰 *Orçamento:* ${e.orcamento || 'N/I'}\\n💳 *Pagamento:* ${e.financiamento || 'N/I'}\\n💵 *Entrada:* ${e.entrada || 'N/A'}\\n⏰ *Melhor horário:* ${e.contato_preferido || 'N/I'}\\n━━━━━━━━━━━━━━━━━━━\\n📲 *Abrir conversa:* https://wa.me/55${item.telefone}`;\n\nreturn [{\n  json: {\n    telefone: item.telefone,\n    chatId: item.chatId,\n    nome: e.nome || item.nome,\n    ficha,\n    dataHora: agora,\n    interesse: e.interesse,\n    modelo_interesse: e.modelo_interesse,\n    orcamento: e.orcamento,\n    financiamento: e.financiamento,\n    entrada: e.entrada,\n    contato_preferido: e.contato_preferido\n  }\n}];"
+      },
+      "id": "d5bb01f4-0a66-4ba9-833d-e9205cb04497",
+      "name": "10 | Montar Ficha",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2336,
+        -416
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://waha-production-8d99.up.railway.app/api/sendText",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-Api-Key",
+              "value": "skymotor2025"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session\": \"default\",\n  \"chatId\": \"5541996893300@c.us\",\n  \"text\": {{ JSON.stringify($json.ficha) }}\n}",
+        "options": {}
+      },
+      "id": "a788eed1-7264-4510-a75c-a4e7209996da",
+      "name": "11 | Notificar Vendedor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2128,
+        -496
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "value": "skymotors",
+          "__rl": true,
+          "mode": "name"
+        },
+        "table": {
+          "value": "leads",
+          "__rl": true,
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "telefone": "={{ $json.telefone }}",
+            "nome": "={{ $json.nome }}",
+            "interesse": "={{ $json.interesse }}",
+            "modelo_interesse": "={{ $json.modelo_interesse }}",
+            "orcamento": "={{ $json.orcamento }}",
+            "financiamento": "={{ $json.financiamento }}",
+            "entrada": "={{ $json.entrada }}",
+            "contato_preferido": "={{ $json.contato_preferido }}",
+            "status": "Novo Lead",
+            "link_whatsapp": "=https://wa.me/55{{ $json.telefone }}",
+            "id": 0
+          },
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "telefone",
+              "displayName": "telefone",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "nome",
+              "displayName": "nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "interesse",
+              "displayName": "interesse",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "modelo_interesse",
+              "displayName": "modelo_interesse",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "orcamento",
+              "displayName": "orcamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "financiamento",
+              "displayName": "financiamento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "entrada",
+              "displayName": "entrada",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "contato_preferido",
+              "displayName": "contato_preferido",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "link_whatsapp",
+              "displayName": "link_whatsapp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "observacoes",
+              "displayName": "observacoes",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "criado_em",
+              "displayName": "criado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "atualizado_em",
+              "displayName": "atualizado_em",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "975fe473-57ab-4d70-bb2e-28bd57dfc596",
+      "name": "12 | Salvar no Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -2128,
+        -304
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "7l85G29XXVVnMoRu",
+          "name": "Banco - Sky Motors"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "ok",
+        "options": {}
+      },
+      "id": "35cc53e5-c973-47f4-a21e-e1bd24ae7791",
+      "name": "13 | Responder OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        -1936,
+        -304
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 | Webhook WAHA": {
+      "main": [
+        [
+          {
+            "node": "02 | Extrair Mensagem",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 | Extrair Mensagem": {
+      "main": [
+        [
+          {
+            "node": "03 | Filtrar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 | Filtrar": {
+      "main": [
+        [
+          {
+            "node": "04 | Get Estado Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 | Get Estado Redis": {
+      "main": [
+        [
+          {
+            "node": "05 | Montar Contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 | Montar Contexto": {
+      "main": [
+        [
+          {
+            "node": "06 | Motor SDR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 | Motor SDR": {
+      "main": [
+        [
+          {
+            "node": "07 | Set Estado Redis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 | Set Estado Redis": {
+      "main": [
+        [
+          {
+            "node": "08 | Enviar WhatsApp Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08 | Enviar WhatsApp Lead": {
+      "main": [
+        [
+          {
+            "node": "09 | Lead Qualificado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 | Lead Qualificado?": {
+      "main": [
+        [
+          {
+            "node": "10 | Montar Ficha",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "13 | Responder OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10 | Montar Ficha": {
+      "main": [
+        [
+          {
+            "node": "11 | Notificar Vendedor",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "12 | Salvar no Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 | Notificar Vendedor": {
+      "main": [
+        [
+          {
+            "node": "13 | Responder OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12 | Salvar no Postgres": {
+      "main": [
+        [
+          {
+            "node": "13 | Responder OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "9902ad27-78ac-4815-8aa6-72e6731db29c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e07e9cdb87c7565756d553033c3a4ae4c38a1b40463b14e7da718be56aac1db4"
+  },
+  "id": "9BTnfQ7sVC30xiPH",
+  "tags": []
+}
