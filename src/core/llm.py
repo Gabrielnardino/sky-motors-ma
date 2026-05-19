@@ -1,29 +1,104 @@
 """
-Claude Haiku — drives the entire qualification conversation.
-Replaces the rigid state machine with natural language understanding.
+LangChain + Claude Haiku — conversation engine for Sky Motors BDC bot.
+Structured output replaces manual JSON parsing.
+LangSmith tracing enabled via environment variables set in main.py.
 """
 from __future__ import annotations
-import json
-import re
+from typing import Literal
 from loguru import logger
-import anthropic
+
+from pydantic import BaseModel, Field
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_community.chat_message_histories import RedisChatMessageHistory
 
 from src.core.config import settings
 
-_client: anthropic.AsyncAnthropic | None = None
+# ---------------------------------------------------------------------------
+# LLM client
+# ---------------------------------------------------------------------------
+
+_llm: ChatAnthropic | None = None
 
 
-def get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if _client is None:
-        api_key = settings.anthropic_api_key or None
-        _client = anthropic.AsyncAnthropic(api_key=api_key)
-    return _client
+def get_llm() -> ChatAnthropic:
+    global _llm
+    if _llm is None:
+        kwargs = {"model": "claude-haiku-4-5-20251001", "max_tokens": 800}
+        if settings.anthropic_api_key:
+            kwargs["api_key"] = settings.anthropic_api_key
+        _llm = ChatAnthropic(**kwargs)
+    return _llm
+
+
+# ---------------------------------------------------------------------------
+# Structured output schema — replaces manual JSON parsing
+# ---------------------------------------------------------------------------
+
+class TradeInInfo(BaseModel):
+    descricao: str | None = Field(None, description="Vehicle make/model/year")
+    km: str | None = Field(None, description="Mileage")
+    condicao: str | None = Field(None, description="Condition")
+    payoff: bool | None = Field(None, description="Whether there is a remaining loan balance")
+    payoff_valor: str | None = Field(None, description="Payoff amount if applicable")
+    titulo: str | None = Field(None, description="Title status")
+
+
+class ExtractedFields(BaseModel):
+    nome: str | None = Field(None, description="Customer name")
+    interesse: Literal["buy", "trade", "financing", "agent"] | None = Field(None, description="Customer intent")
+    veiculo_interesse: str | None = Field(None, description="Vehicle of interest")
+    budget: str | None = Field(None, description="Target installment/monthly payment — accept any phrasing")
+    tem_trade_in: bool | None = Field(None, description="Whether customer has a trade-in")
+    trade_in: TradeInInfo | None = Field(None, description="Trade-in vehicle details")
+    precisa_financing: bool | None = Field(None, description="Whether customer needs financing")
+    down_payment: str | None = Field(None, description="Down payment amount — accept any phrasing")
+    credit_score_range: str | None = Field(None, description="Credit score range")
+    pre_aprovado: bool | None = Field(None, description="Whether customer has pre-approval")
+    contato_preferido: str | None = Field(None, description="Best time to contact")
+
+
+class SarahOutput(BaseModel):
+    idioma: Literal["PT", "ES", "EN"] = Field(description="Language of this conversation")
+    extracted: ExtractedFields = Field(description="Fields confidently extracted from THIS message only")
+    reply: str = Field(description="Sarah's reply to the customer")
+    done: bool = Field(default=False, description="True only when all required fields collected and customer confirmed")
+    wants_agent: bool = Field(default=False, description="True if customer explicitly asks for a human")
+
+
+# ---------------------------------------------------------------------------
+# History via Redis (LangChain-managed)
+# ---------------------------------------------------------------------------
+
+def get_history(phone: str) -> RedisChatMessageHistory:
+    return RedisChatMessageHistory(
+        session_id=phone,
+        url=settings.redis_url,
+        ttl=86400,
+        key_prefix="history:",
+    )
 
 
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
+
+_LANG_NAMES = {"PT": "Portuguese (Brazilian)", "ES": "Spanish", "EN": "English"}
+
+_LANG_LOCKED = """\
+⚠️  MANDATORY LANGUAGE RULE — READ THIS FIRST ⚠️
+The language for this conversation is: {lang_name} ({lang_code}).
+Every single word of your "reply" field MUST be written in {lang_name}.
+Do NOT switch to any other language — not even if the customer sends a short message, a name, a number, or something ambiguous.
+If unsure what they meant, ask for clarification IN {lang_name}.
+Your "idioma" field must always return "{lang_code}".\
+"""
+
+_LANG_DETECT = """\
+LANGUAGE: This is the first message. Detect the language from what the customer wrote and respond in that same language.
+The dealership serves a large Brazilian (Portuguese) and Hispanic (Spanish) community in addition to English speakers.
+Set "idioma" to "PT" for Portuguese, "ES" for Spanish, "EN" for English.\
+"""
 
 _SYSTEM = """\
 {lang_instruction}
@@ -128,56 +203,6 @@ HARD RULES
 - If you don't know: "Deixa eu verificar com a equipe e te falo rapidinho."
 - If customer asks for a human: wants_agent true, acknowledge warmly.
 - Never manufacture urgency. Only use it when genuinely true.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-RESPONSE FORMAT — return ONLY valid JSON, nothing else
-━━━━━━━━━━━━━━━━━━━━━━━━
-{{
-  "idioma": "EN",
-  "extracted": {{
-    "nome": null,
-    "interesse": null,
-    "veiculo_interesse": null,
-    "budget": null,
-    "tem_trade_in": null,
-    "trade_in": null,
-    "precisa_financing": null,
-    "down_payment": null,
-    "credit_score_range": null,
-    "pre_aprovado": null,
-    "contato_preferido": null
-  }},
-  "reply": "your message to the customer",
-  "done": false,
-  "wants_agent": false
-}}
-
-Field rules:
-- "idioma": match the MANDATORY LANGUAGE exactly ("PT", "ES", "EN"). Never change it mid-conversation.
-- "extracted": only fields confidently extractable from THIS message. null for everything else.
-- "trade_in": dict with any of {{"descricao", "km", "condicao", "payoff", "payoff_valor", "titulo"}} — null if not discussed.
-- "interesse": "buy", "trade", "financing", or "agent" — null if still unclear.
-- "budget": accept ANY phrasing — "o mais barato", "uns $300/mes", "algo acessivel". Extract as-is.
-- "down_payment": accept ANY phrasing — "nao tenho entrada", "$500", "o minimo possivel". Extract as-is.
-- "done": true only when every required field is collected AND customer confirmed the wrap-up message.
-- "wants_agent": true if customer explicitly asks for a human or salesperson.
-"""
-
-_LANG_NAMES = {"PT": "Portuguese (Brazilian)", "ES": "Spanish", "EN": "English"}
-
-_LANG_LOCKED = """\
-⚠️  MANDATORY LANGUAGE RULE — READ THIS FIRST ⚠️
-The language for this conversation is: {lang_name} ({lang_code}).
-Every single word of your "reply" field MUST be written in {lang_name}.
-Do NOT switch to any other language — not even if the customer sends a short message, a name, a number, or something ambiguous.
-If unsure what they meant, ask for clarification IN {lang_name}.
-Your "idioma" field must always return "{lang_code}".\
-"""
-
-_LANG_DETECT = """\
-LANGUAGE: This is the first message. Detect the language from what the customer wrote and respond in that same language.
-The dealership serves a large Brazilian (Portuguese) and Hispanic (Spanish) community in addition to English speakers.
-Set "idioma" to "PT" for Portuguese, "ES" for Spanish, "EN" for English.\
 """
 
 
@@ -286,96 +311,78 @@ async def _inventory_context(state: dict) -> str:
         return ""
 
 
-def _parse_llm_json(raw: str) -> dict | None:
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        pass
-    match = re.search(r'\{.*\}', raw, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Main conversation entry point
 # ---------------------------------------------------------------------------
 
-async def chat(state: dict, text: str, history: list[dict] | None = None) -> tuple[dict, str]:
+async def chat(state: dict, text: str, phone: str) -> tuple[dict, str]:
     """
-    Drive the qualification conversation via LLM.
+    Drive the qualification conversation via LangChain + Claude Haiku.
     Returns (updated_state, reply_text).
+    History is managed automatically via RedisChatMessageHistory.
+    Traces sent to LangSmith when LANG_SMITH_API_KEY is configured.
     """
     inv_ctx = await _inventory_context(state)
 
     current_lang = state.get("idioma")
-    if current_lang:
-        lang_instruction = _LANG_LOCKED.format(
+    lang_instruction = (
+        _LANG_LOCKED.format(
             lang_name=_LANG_NAMES.get(current_lang, current_lang),
             lang_code=current_lang,
         )
-    else:
-        lang_instruction = _LANG_DETECT
+        if current_lang else _LANG_DETECT
+    )
 
-    system = _SYSTEM.format(
+    system_text = _SYSTEM.format(
         lang_instruction=lang_instruction,
         state_summary=_state_summary(state),
         missing_fields=_missing_fields(state),
         inventory_section=inv_ctx,
     )
 
-    # Build messages: full history + current message
-    messages: list[dict] = list(history or [])
-    messages.append({"role": "user", "content": text})
+    # Load history from Redis
+    history = get_history(phone)
+    past_messages = await history.aget_messages()
+
+    # Build message list: system + history + current user message
+    messages = [SystemMessage(content=system_text)] + past_messages + [HumanMessage(content=text)]
+
+    # Structured output — no more manual JSON parsing
+    structured_llm = get_llm().with_structured_output(SarahOutput)
 
     try:
-        msg = await get_client().messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=800,
-            system=system,
-            messages=messages,
-        )
-        raw = msg.content[0].text.strip()
-        logger.debug("LLM raw response | {!r}", raw[:300])
+        result: SarahOutput = await structured_llm.ainvoke(messages)
+        logger.debug("LLM reply | phone={} reply={!r}", phone, result.reply[:80])
     except Exception as e:
-        logger.error("LLM chat request failed | error={}", e)
+        logger.error("LLM chat failed | phone={} error={}", phone, e)
         return state, "I'm sorry, I'm having a technical issue right now. Please try again in a moment."
 
-    data = _parse_llm_json(raw)
-    if not data:
-        logger.warning("LLM returned unparseable JSON | raw={!r}", raw[:300])
-        # Use raw as reply if it looks like prose
-        return state, raw
+    # Persist this exchange to history
+    await history.aadd_messages([HumanMessage(content=text), AIMessage(content=result.reply)])
 
-    # -- Merge extracted fields into state --
-    extracted = {k: v for k, v in (data.get("extracted") or {}).items() if v is not None}
-
+    # Merge extracted fields into state
+    extracted = result.extracted.model_dump(exclude_none=True)
     new_state = {**state, **{k: v for k, v in extracted.items() if k != "trade_in"}}
 
-    # Merge trade_in dict (don't overwrite existing keys with null)
+    # Merge trade_in without overwriting existing keys with null
     if "trade_in" in extracted and isinstance(extracted["trade_in"], dict):
         existing_trade = state.get("trade_in") or {}
-        new_state["trade_in"] = {**existing_trade, **{k: v for k, v in extracted["trade_in"].items() if v is not None}}
+        new_state["trade_in"] = {
+            **existing_trade,
+            **{k: v for k, v in extracted["trade_in"].items() if v is not None},
+        }
 
-    # Language — set once on first detection, never overridden after that
-    if not state.get("idioma") and data.get("idioma"):
-        new_state["idioma"] = data["idioma"]
+    # Language locked on first detection
+    if not state.get("idioma") and result.idioma:
+        new_state["idioma"] = result.idioma
 
-    # Terminal states
-    if data.get("wants_agent"):
+    # Terminal state
+    if result.wants_agent:
         new_state["etapa"] = "agent"
         new_state.setdefault("interesse", "agent")
-    elif data.get("done"):
+    elif result.done:
         new_state["etapa"] = "done"
     else:
         new_state["etapa"] = "active"
 
-    reply = (data.get("reply") or "").strip()
-    if not reply:
-        logger.warning("LLM returned empty reply field")
-        return state, "I'm sorry, something went wrong. Please try again."
-
-    return new_state, reply
+    return new_state, result.reply

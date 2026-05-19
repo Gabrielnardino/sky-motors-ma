@@ -170,16 +170,9 @@ async def _handle_message(phone: str, text: str) -> None:
     step_before   = current_state.get("etapa", "")
     lang_before   = current_state.get("idioma", "EN")
 
-    # Load conversation history so the LLM has full context
-    history = await state_manager.get_history(phone)
-
-    # Generate reply (LLM call with history)
-    new_state, reply = await llm.chat(current_state, text, history)
+    # History is managed by LangChain (RedisChatMessageHistory) inside llm.chat
+    new_state, reply = await llm.chat(current_state, text, phone)
     await state_manager.set_state(phone, new_state)
-
-    # Persist this exchange to history for the next turn
-    await state_manager.push_history(phone, "user", text)
-    await state_manager.push_history(phone, "assistant", reply)
 
     try:
         await leads_repo.log_message(phone, "inbound", text, step_before, lang_before)

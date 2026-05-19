@@ -23,5 +23,8 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     groq_api_key: str = ""
 
+    lang_smith_api_key: str = ""
+    langchain_project: str = "sky-motors-ma"
+
 
 settings = Settings()

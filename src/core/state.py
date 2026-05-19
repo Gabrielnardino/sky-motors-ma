@@ -105,46 +105,6 @@ async def drain_pending(phone: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Conversation history — keeps last N turns for LLM context
-# ---------------------------------------------------------------------------
-
-HISTORY_MAX_TURNS = 20   # 20 exchanges = 40 messages stored
-HISTORY_TTL = 86400      # same as STATE_TTL
-
-
-def _history_key(phone: str) -> str:
-    return f"history:{phone}"
-
-
-async def push_history(phone: str, role: str, content: str) -> None:
-    """Append a message to conversation history. Trims to HISTORY_MAX_TURNS exchanges."""
-    r = await get_redis()
-    key = _history_key(phone)
-    await r.rpush(key, json.dumps({"role": role, "content": content}))
-    # Keep at most 2 * HISTORY_MAX_TURNS entries (each turn = user + assistant)
-    await r.ltrim(key, -(HISTORY_MAX_TURNS * 2), -1)
-    await r.expire(key, HISTORY_TTL)
-
-
-async def get_history(phone: str) -> list[dict]:
-    """Return conversation history as list of {role, content} dicts."""
-    r = await get_redis()
-    raw_list = await r.lrange(_history_key(phone), 0, -1)
-    result = []
-    for raw in raw_list:
-        try:
-            result.append(json.loads(raw))
-        except Exception:
-            pass
-    return result
-
-
-async def clear_history(phone: str) -> None:
-    r = await get_redis()
-    await r.delete(_history_key(phone))
-
-
-# ---------------------------------------------------------------------------
 # Typing presence state
 # ---------------------------------------------------------------------------
 
