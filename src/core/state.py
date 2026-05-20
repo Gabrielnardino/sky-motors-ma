@@ -26,7 +26,14 @@ def _msg_key(msg_id: str) -> str:
 async def get_redis() -> redis.Redis:
     global _redis
     if _redis is None:
-        _redis = redis.from_url(settings.redis_url, decode_responses=True)
+        _redis = redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+        )
     return _redis
 
 
@@ -37,9 +44,31 @@ async def close_redis() -> None:
         _redis = None
 
 
+async def _reset_redis() -> redis.Redis:
+    """Force reconnect — called when connection is stale after infra restart."""
+    global _redis
+    if _redis:
+        try:
+            await _redis.aclose()
+        except Exception:
+            pass
+    _redis = None
+    return await get_redis()
+
+
+async def _exec(fn):
+    """Execute a Redis operation, auto-reconnecting once on timeout."""
+    try:
+        r = await get_redis()
+        return await fn(r)
+    except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError) as e:
+        logger.warning("Redis connection lost, reconnecting | error={}", e)
+        r = await _reset_redis()
+        return await fn(r)
+
+
 async def get_state(phone: str) -> State:
-    r = await get_redis()
-    raw = await r.get(_key(phone))
+    raw = await _exec(lambda r: r.get(_key(phone)))
     if raw:
         return json.loads(raw)
     logger.info("New conversation | phone={}", phone)
@@ -47,23 +76,19 @@ async def get_state(phone: str) -> State:
 
 
 async def set_state(phone: str, state: State) -> None:
-    r = await get_redis()
-    await r.set(_key(phone), json.dumps(state), ex=STATE_TTL)
+    await _exec(lambda r: r.set(_key(phone), json.dumps(state), ex=STATE_TTL))
 
 
 async def delete_state(phone: str) -> None:
-    r = await get_redis()
-    await r.delete(_key(phone))
+    await _exec(lambda r: r.delete(_key(phone)))
 
 
 async def is_duplicate(msg_id: str) -> bool:
-    r = await get_redis()
-    return bool(await r.exists(_msg_key(msg_id)))
+    return bool(await _exec(lambda r: r.exists(_msg_key(msg_id))))
 
 
 async def mark_processed(msg_id: str) -> None:
-    r = await get_redis()
-    await r.set(_msg_key(msg_id), "1", ex=MSG_DEDUP_TTL)
+    await _exec(lambda r: r.set(_msg_key(msg_id), "1", ex=MSG_DEDUP_TTL))
 
 
 # ---------------------------------------------------------------------------
@@ -78,48 +103,44 @@ def _pending_ts_key(phone: str) -> str:
 
 
 async def push_pending(phone: str, text: str) -> float:
-    """Append message to pending queue, update timestamp. Returns current timestamp."""
-    r = await get_redis()
     ts = time.time()
-    await r.rpush(_pending_key(phone), text)
-    await r.expire(_pending_key(phone), PENDING_TTL)
-    await r.set(_pending_ts_key(phone), str(ts), ex=PENDING_TTL)
+    async def _push(r):
+        await r.rpush(_pending_key(phone), text)
+        await r.expire(_pending_key(phone), PENDING_TTL)
+        await r.set(_pending_ts_key(phone), str(ts), ex=PENDING_TTL)
+    await _exec(_push)
     return ts
 
 
 async def get_latest_ts(phone: str) -> float:
-    """Return the timestamp of the most recently queued message."""
-    r = await get_redis()
-    val = await r.get(_pending_ts_key(phone))
+    val = await _exec(lambda r: r.get(_pending_ts_key(phone)))
     return float(val) if val else 0.0
 
 
 async def drain_pending(phone: str) -> list[str]:
-    """Atomically pop all pending messages. Returns empty list if already drained."""
-    r = await get_redis()
-    pipe = r.pipeline()
-    pipe.lrange(_pending_key(phone), 0, -1)
-    pipe.delete(_pending_key(phone), _pending_ts_key(phone))
-    results = await pipe.execute()
-    return results[0] or []
+    async def _drain(r):
+        pipe = r.pipeline()
+        pipe.lrange(_pending_key(phone), 0, -1)
+        pipe.delete(_pending_key(phone), _pending_ts_key(phone))
+        results = await pipe.execute()
+        return results[0] or []
+    return await _exec(_drain)
 
 
 # ---------------------------------------------------------------------------
 # Typing presence state
 # ---------------------------------------------------------------------------
 
-TYPING_TTL = 30  # seconds — expire typing state if no update received
+TYPING_TTL = 30
 
 
 async def set_typing(phone: str, active: bool) -> None:
-    r = await get_redis()
     key = f"typing:{phone}"
     if active:
-        await r.set(key, "1", ex=TYPING_TTL)
+        await _exec(lambda r: r.set(key, "1", ex=TYPING_TTL))
     else:
-        await r.delete(key)
+        await _exec(lambda r: r.delete(key))
 
 
 async def is_typing(phone: str) -> bool:
-    r = await get_redis()
-    return bool(await r.exists(f"typing:{phone}"))
+    return bool(await _exec(lambda r: r.exists(f"typing:{phone}")))
